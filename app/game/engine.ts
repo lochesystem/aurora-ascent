@@ -4,6 +4,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { classifyEnemyContact, coinWithinPickup } from "./collision.js";
 import type { GameSettings } from "./settings";
 
 export interface GameSnapshot {
@@ -322,15 +323,22 @@ export class AuroraGame {
   }
 
   private updateCoins(dt:number) {
-    const playerPos=this.player.position;
-    for(const coin of this.coins){if(coin.collected)continue;coin.mesh.rotation.y+=dt*2.8;coin.mesh.position.y=coin.position.y+Math.sin(performance.now()*.0025+coin.phase)*.16;if(playerPos.distanceTo(coin.mesh.position)<1.05){coin.collected=true;coin.mesh.visible=false;this.coinsCollected++;this.pulse(.18,45);this.callbacks.onToast(this.coinsCollected===COIN_POSITIONS.length?"Todos os fragmentos reunidos!":"Fragmento solar +1");this.emitSnapshot();this.checkUnlock();}}
+    const pickupCenter={x:this.player.position.x,y:this.player.position.y+.75,z:this.player.position.z};
+    for(const coin of this.coins){if(coin.collected)continue;coin.mesh.rotation.y+=dt*2.8;coin.mesh.position.y=coin.position.y+Math.sin(performance.now()*.0025+coin.phase)*.16;if(coinWithinPickup(pickupCenter,coin.mesh.position)){coin.collected=true;coin.mesh.visible=false;this.coinsCollected++;this.pulse(.18,45);this.callbacks.onToast(this.coinsCollected===COIN_POSITIONS.length?"Todos os fragmentos reunidos!":"Fragmento solar +1");this.emitSnapshot();this.checkUnlock();}}
   }
 
   private updateEnemies(dt:number) {
     const now=performance.now()*.001;
     for(const enemy of this.enemies){if(!enemy.alive)continue;enemy.hit=Math.max(0,enemy.hit-dt);const a=now*.72+enemy.phase;enemy.position.set(enemy.origin.x+Math.cos(a)*1.05,enemy.origin.y,enemy.origin.z+Math.sin(a)*1.05);enemy.mesh.position.copy(enemy.position);enemy.mesh.rotation.y=-a+.6;enemy.mesh.position.y+=Math.sin(now*3+enemy.phase)*.08;
-      const dx=this.player.position.x-enemy.position.x,dz=this.player.position.z-enemy.position.z,dist=Math.hypot(dx,dz);const vertical=this.player.position.y-enemy.position.y;
-      if(dist<.9){if(this.verticalVelocity< -2&&vertical>.55){this.killEnemy(enemy,true);this.verticalVelocity=8.2;this.jumpsRemaining=1;}else if(this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.5;this.verticalVelocity=5.5;this.jumpsRemaining=1;this.callbacks.onDamage();this.pulse(.8,180);this.emitSnapshot();if(this.health<=0)this.die();}}
+      const dx=this.player.position.x-enemy.position.x,dz=this.player.position.z-enemy.position.z,dist=Math.hypot(dx,dz);
+      const enemyTop=enemy.mesh.position.y+.86;
+      const contact=classifyEnemyContact({horizontalDistance:dist,playerFeetY:this.player.position.y-.04,enemyTopY:enemyTop,verticalVelocity:this.verticalVelocity});
+      if(contact==="stomp"){
+        const body=this.playerBody.translation();
+        const bounceHeight=enemyTop+.98;
+        if(body.y<bounceHeight){this.playerBody.setTranslation({x:body.x,y:bounceHeight,z:body.z},true);this.playerBody.setNextKinematicTranslation({x:body.x,y:bounceHeight,z:body.z});this.player.position.y=bounceHeight-.89;}
+        this.killEnemy(enemy,true);this.verticalVelocity=8.2;this.jumpsRemaining=1;
+      }else if(contact==="hurt"&&this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.5;this.verticalVelocity=5.5;this.jumpsRemaining=1;this.callbacks.onDamage();this.pulse(.8,180);this.emitSnapshot();if(this.health<=0)this.die();}
     }
   }
 
