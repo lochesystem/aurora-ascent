@@ -34,12 +34,14 @@ test("mantém os sistemas essenciais da fase no bundle-fonte", async () => {
   assert.match(engine, /computeColliderMovement/);
   assert.match(engine, /jumpsRemaining = 2/);
   assert.match(engine, /isDoubleJump/);
-  assert.match(engine, /COIN_POSITIONS/);
-  assert.match(engine, /ENEMY_POSITIONS/);
+  assert.match(engine, /generateLevel/);
+  assert.match(engine, /fireProjectile/);
   assert.match(engine, /vibrationActuator/);
   assert.match(shell, /Você caiu/);
   assert.match(shell, /Pulo duplo/);
   assert.match(shell, /DualSense/);
+  assert.match(shell, /Mapa de fases/);
+  assert.match(shell, /aurora-ascent-progress/);
   assert.match(engine, /DualSense conectado/);
   assert.match(settings, /localStorage/);
   assert.match(packageJson, /@dimforge\/rapier3d-compat/);

@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuroraGame, type GameSnapshot } from "./engine";
+import { CAMPAIGN_LEVELS, generateLevel } from "./levels.js";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type GameSettings } from "./settings";
 
-type Screen = "title" | "playing" | "paused" | "dead" | "victory";
-const EMPTY: GameSnapshot = { coins: 0, totalCoins: 18, health: 3, enemies: 5, totalEnemies: 5, gamepad: "" };
+type Screen = "title" | "map" | "playing" | "paused" | "dead" | "victory";
+const EMPTY: GameSnapshot = { coins: 0, totalCoins: 7, health: 3, enemies: 2, totalEnemies: 2, gamepad: "" };
 
 export default function GameShell() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -18,6 +19,10 @@ export default function GameShell() {
   const [snapshot, setSnapshot] = useState<GameSnapshot>(EMPTY);
   const [toast, setToast] = useState("");
   const [damageFlash, setDamageFlash] = useState(false);
+  const [activeLevel, setActiveLevel] = useState(1);
+  const [unlockedLevel, setUnlockedLevel] = useState(1);
+  const [runId, setRunId] = useState(0);
+  const levelInfo=generateLevel(activeLevel);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -27,22 +32,25 @@ export default function GameShell() {
 
   useEffect(() => {
     setSettings(loadSettings());
+    const saved=Number(localStorage.getItem("aurora-ascent-progress")||1);setUnlockedLevel(Math.max(1,Math.min(26,saved)));
     if (!canvasRef.current) return;
     const game = new AuroraGame(canvasRef.current, {
       onSnapshot: setSnapshot,
       onDeath: () => setScreen("dead"),
-      onVictory: () => setScreen("victory"),
+      onVictory: () => {
+        const next=Math.min(26,activeLevel+1);setUnlockedLevel(current=>{const unlocked=Math.max(current,next);localStorage.setItem("aurora-ascent-progress",String(unlocked));return unlocked});setScreen("victory");
+      },
       onToast: showToast,
       onDamage: () => {
         setDamageFlash(false);
         requestAnimationFrame(() => setDamageFlash(true));
       },
       onPause: () => setScreen((current) => current === "playing" ? "paused" : current),
-    });
+    }, activeLevel);
     gameRef.current = game;
     void game.init(loadSettings());
     return () => { game.destroy(); gameRef.current = null; };
-  }, [showToast]);
+  }, [showToast,activeLevel,runId]);
 
   useEffect(() => {
     gameRef.current?.setPaused(screen !== "playing");
@@ -57,11 +65,12 @@ export default function GameShell() {
     });
   };
 
-  const startGame = () => {
-    gameRef.current?.reset();
+  const startLevel = (level=activeLevel) => {
+    setActiveLevel(level);
+    setRunId(current=>current+1);
     setScreen("playing");
     setSettingsOpen(false);
-    showToast("Alcance o Farol da Aurora");
+    showToast(`Fase ${level} · ${generateLevel(level).name}`);
     canvasRef.current?.focus();
   };
 
@@ -83,6 +92,7 @@ export default function GameShell() {
       <div className={`hud ${screen !== "playing" ? "hidden" : ""}`} aria-live="polite">
         <div className="hud-top">
           <div className="hud-cluster">
+            <div className="level-pill"><span>Fase</span><b>{activeLevel}</b></div>
             <div className="hud-card"><div className="coin-glyph"/><div><span className="hud-label">Fragmentos</span><strong className="hud-value">{String(snapshot.coins).padStart(2,"0")} / {snapshot.totalCoins}</strong></div></div>
             <div className="hud-card"><div className="hearts">{[0,1,2].map(i => <span key={i} className={`heart ${i >= snapshot.health ? "empty" : ""}`}>♥</span>)}</div></div>
           </div>
@@ -101,16 +111,25 @@ export default function GameShell() {
           <p className="eyebrow">Uma aventura acima das nuvens</p>
           <h1>Aurora <span>Ascent</span></h1>
           <p className="tagline">Os fragmentos solares se espalharam pelas ilhas do céu. Corra, salte e lute até o farol antes que a última luz desapareça.</p>
-          <div className="menu-actions"><button className="primary-btn" onClick={startGame}>Iniciar jornada</button><button className="secondary-btn" onClick={() => openSettings("title")}>Configurações</button></div>
+          <div className="menu-actions"><button className="primary-btn" onClick={() => setScreen("map")}>Mapa de fases</button><button className="secondary-btn" onClick={() => openSettings("title")}>Configurações</button></div>
           <div className="controls-strip"><span><b className="key">WASD</b> mover</span><span><b className="key">Mouse</b> câmera</span><span><b className="key">F</b> ataque</span><span><b className="key">✕</b> DualSense</span></div>
         </div>
       </section>
 
+      {screen === "map" && <section className="campaign-screen">
+        <div className="campaign-heading"><div><p className="eyebrow">Caminho da Aurora</p><h2>Mapa de fases</h2><p>Complete cada ilha para abrir a próxima rota. O desafio aumenta a cada cinco fases.</p></div><div className="campaign-actions"><span>{Math.min(25,unlockedLevel-1)} / 25 concluídas</span><button className="secondary-btn" onClick={()=>setScreen("title")}>Voltar</button></div></div>
+        <div className="campaign-scroll">
+          <div className="level-path" aria-label="Seleção de fases">
+            {CAMPAIGN_LEVELS.map((level)=>{const unlocked=level.number<=unlockedLevel;const completed=level.number<unlockedLevel;return <div key={level.number}>{level.connector&&<span className={`route-segment ${completed?"completed":""}`} style={{left:level.connector.x,top:level.connector.y,width:level.connector.length,transform:`rotate(${level.connector.angle}deg)`}}/>}<button disabled={!unlocked} onClick={()=>startLevel(level.number)} className={`level-node region-${level.region} ${completed?"completed":""} ${level.number===unlockedLevel?"current":""} ${level.number%5===0?"boss":""} ${level.map.x>400?"label-left":""}`} style={{left:level.map.x,top:level.map.y}} aria-label={`Fase ${level.number}: ${level.name}${unlocked?"":" bloqueada"}`}><span className="node-crown">{completed?"★":unlocked?level.number:"◆"}</span><span className="node-copy"><strong>{level.name}</strong><small>{level.gimmick}</small></span></button></div>})}
+          </div>
+        </div>
+      </section>}
+
       {screen === "paused" && !settingsOpen && <div className="modal-backdrop"><div className="pause-card"><p className="eyebrow" style={{justifyContent:"center"}}>Jornada suspensa</p><h2>Pausado</h2><p>Respire. As ilhas continuarão aqui.</p><div className="menu-actions"><button className="primary-btn" onClick={resume}>Continuar</button><button className="secondary-btn" onClick={() => openSettings("paused")}>Configurações</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
 
-      {screen === "dead" && <div className="modal-backdrop death-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A névoa levou sua luz</p><h2>Você caiu</h2><p>A expedição recomeça do início: fragmentos, guardiões e plataformas foram restaurados.</p><div className="menu-actions"><button className="primary-btn" onClick={startGame}>Tentar novamente</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+      {screen === "dead" && <div className="modal-backdrop death-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A névoa levou sua luz</p><h2>Você caiu</h2><p>A fase {activeLevel} recomeça do início: fragmentos, guardiões e plataformas foram restaurados.</p><div className="menu-actions"><button className="primary-btn" onClick={()=>startLevel()}>Tentar novamente</button><button className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
 
-      {screen === "victory" && <div className="modal-backdrop victory-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A luz atravessa as nuvens</p><h2>Farol liberto!</h2><p>Você reuniu os {snapshot.totalCoins} fragmentos e derrotou todos os guardiões da ilha.</p><div className="menu-actions"><button className="primary-btn" onClick={startGame}>Jogar novamente</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+      {screen === "victory" && <div className="modal-backdrop victory-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>Fase {activeLevel} concluída</p><h2>{activeLevel===25?"Cume conquistado!":"Rota aberta!"}</h2><p>Você reuniu os {snapshot.totalCoins} fragmentos e derrotou todos os guardiões de {levelInfo.name}.</p><div className="menu-actions">{activeLevel<25&&<button className="primary-btn" onClick={()=>startLevel(activeLevel+1)}>Próxima fase</button>}<button className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
 
       <div className={`modal-backdrop ${settingsOpen ? "" : "hidden"}`}>
         <div className="modal" role="dialog" aria-modal="true" aria-label="Configurações">

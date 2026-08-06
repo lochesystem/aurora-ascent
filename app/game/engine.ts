@@ -5,6 +5,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { classifyEnemyContact, coinWithinPickup } from "./collision.js";
+import { generateLevel } from "./levels.js";
 import { animateGuardianModel, animatePlayerModel, createGuardianModel, createPlayerModel, type GuardianRig, type PlayerRig } from "./models";
 import type { GameSettings } from "./settings";
 
@@ -27,29 +28,9 @@ interface Callbacks {
 }
 
 type Coin = { mesh: THREE.Group; position: THREE.Vector3; collected: boolean; phase: number };
-type Enemy = { mesh: THREE.Group; rig: GuardianRig; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number };
-
-const PLATFORM_DATA = [
-  { p:[0,0,0], s:[18,2,16], c:0x57a875 },
-  { p:[10,2.4,-5], s:[7,1.5,7], c:0x5ab77f },
-  { p:[15,5.3,-1], s:[6,1.4,6], c:0x67be82 },
-  { p:[9,8.3,5], s:[6,1.4,6], c:0x55af7a },
-  { p:[1,11.2,8], s:[7,1.5,7], c:0x63bd83 },
-  { p:[-7,14.4,5], s:[6,1.4,6], c:0x53aa78 },
-  { p:[-12,17.5,-1], s:[6,1.4,6], c:0x64bb82 },
-  { p:[-7,20.7,-8], s:[7,1.5,7], c:0x58ae7c },
-  { p:[2,23.8,-10], s:[8,1.6,8], c:0x6dc78b },
-] as const;
-
-const COIN_POSITIONS = [
-  [-5,2,2],[0,2,-4],[5,2,3], [9,4.6,-5],[12,4.6,-3], [15,7.5,-1],[16,7.5,1],
-  [9,10.5,5],[7,10.5,6], [1,13.5,8],[-2,13.5,7], [-7,16.7,5],[-8,16.7,3],
-  [-12,19.8,-1],[-11,19.8,-3], [-7,23,-8],[-5,23,-9], [2,26.3,-10],
-] as const;
-
-const ENEMY_POSITIONS = [
-  [4,1.8,-1], [10,4.45,-5], [9,10.35,5], [-7,16.55,5], [-7,22.9,-8],
-] as const;
+type Enemy = { mesh: THREE.Group; rig: GuardianRig; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number; shooter:boolean; lastShot:number };
+type Projectile = { mesh:THREE.Mesh; velocity:THREE.Vector3; life:number };
+type JumpPad = { mesh:THREE.Group; position:THREE.Vector3; power:number; cooldown:number };
 
 export class AuroraGame {
   private canvas: HTMLCanvasElement;
@@ -83,21 +64,25 @@ export class AuroraGame {
   private grounded = false;
   private jumpsRemaining = 2;
   private yaw = .55;
-  private pitch = .42;
+  private pitch = .5;
   private attackTimer = 0;
   private hurtCooldown = 0;
   private coinsCollected = 0;
   private health = 3;
-  private remainingEnemies = ENEMY_POSITIONS.length;
+  private remainingEnemies = 0;
   private gamepadIndex: number | null = null;
   private gamepadButtons = new Set<number>();
   private lastGamepadName = "";
   private goalUnlocked = false;
   private listeners: Array<() => void> = [];
+  private projectiles: Projectile[] = [];
+  private jumpPads: JumpPad[] = [];
+  private level: ReturnType<typeof generateLevel>;
 
-  constructor(canvas: HTMLCanvasElement, callbacks: Callbacks) {
+  constructor(canvas: HTMLCanvasElement, callbacks: Callbacks, levelNumber=1) {
     this.canvas = canvas;
     this.callbacks = callbacks;
+    this.level=generateLevel(levelNumber);
   }
 
   async init(settings: GameSettings) {
@@ -152,8 +137,10 @@ export class AuroraGame {
     sunBall.position.set(-55,52,-90); this.scene.add(sunBall);
 
     this.makeCloudSea();
-    PLATFORM_DATA.forEach((item, i) => this.addIsland(item.p, item.s, item.c, i));
+    this.level.platforms.forEach((item, i) => this.addIsland(item.p, item.s, item.c, i, item.kind));
     this.addBridgesAndDecor();
+    this.makePipes();
+    this.makeCourseObstacles();
     this.makePlayer();
     this.makeCoins();
     this.makeEnemies();
@@ -167,32 +154,30 @@ export class AuroraGame {
     this.camera.position.set(9,8,12);
   }
 
-  private addIsland(position: readonly number[], size: readonly number[], color: number, index: number) {
+  private addIsland(position: readonly number[], size: readonly number[], color: number, index: number, kind="island") {
     const [x,y,z] = position, [w,h,d] = size;
     const group = new THREE.Group();
     group.position.set(x,y,z);
     const cliffMat = new THREE.MeshStandardMaterial({color: index % 2 ? 0x8b6c7c : 0x75657d, roughness:.88, flatShading:true});
     const topMat = new THREE.MeshStandardMaterial({color, roughness:.76, flatShading:true});
-    const cliff = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.42, Math.min(w,d)*.25, h+3, 8), cliffMat);
-    cliff.scale.x = w/d; cliff.position.y = -(h+3)/2 + h/2; cliff.castShadow = cliff.receiveShadow = true; group.add(cliff);
-    const top = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.5, Math.min(w,d)*.46, .55, 8), topMat);
-    top.scale.x = w/d; top.position.y = h/2+.12; top.castShadow = top.receiveShadow = true; group.add(top);
-    const rimMat = new THREE.MeshStandardMaterial({color:new THREE.Color(color).multiplyScalar(.68),roughness:.9,flatShading:true});
-    const rim = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.465,Math.min(w,d)*.43,.2,8),rimMat);
-    rim.scale.x=w/d;rim.position.y=h/2-.19;rim.castShadow=rim.receiveShadow=true;group.add(rim);
-    const grassMat = new THREE.MeshStandardMaterial({color:new THREE.Color(color).offsetHSL(.02,.08,.08),roughness:.92,flatShading:true});
-    const tuftGeometry = new THREE.ConeGeometry(.08,.34,4);
-    for(let tuftIndex=0;tuftIndex<5;tuftIndex++){
-      const angle=index*1.31+tuftIndex*2.17;
-      const tuft=new THREE.Mesh(tuftGeometry,grassMat);
-      tuft.position.set(Math.cos(angle)*w*.31,h/2+.49,Math.sin(angle)*d*.31);
-      tuft.rotation.y=angle;tuft.scale.set(1+(tuftIndex%2)*.4,.8+(tuftIndex%3)*.18,1);tuft.castShadow=true;group.add(tuft);
+    const organic=kind==="island"||kind==="small";
+    if(organic){
+      const cliff=new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.42,Math.min(w,d)*.25,h+3,8),cliffMat);cliff.scale.x=w/d;cliff.position.y=-1.5;cliff.castShadow=cliff.receiveShadow=true;group.add(cliff);
+      const top=new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.5,Math.min(w,d)*.46,.55,8),topMat);top.scale.x=w/d;top.position.y=h/2+.12;top.castShadow=top.receiveShadow=true;group.add(top);
+      const rimMat=new THREE.MeshStandardMaterial({color:new THREE.Color(color).multiplyScalar(.68),roughness:.9,flatShading:true});const rim=new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.465,Math.min(w,d)*.43,.2,8),rimMat);rim.scale.x=w/d;rim.position.y=h/2-.19;rim.castShadow=rim.receiveShadow=true;group.add(rim);
+      const grassMat=new THREE.MeshStandardMaterial({color:new THREE.Color(color).offsetHSL(.02,.08,.08),roughness:.92,flatShading:true});const tuftGeometry=new THREE.ConeGeometry(.08,.34,4);for(let tuftIndex=0;tuftIndex<4;tuftIndex++){const angle=index*1.31+tuftIndex*2.17;const tuft=new THREE.Mesh(tuftGeometry,grassMat);tuft.position.set(Math.cos(angle)*w*.3,h/2+.49,Math.sin(angle)*d*.3);tuft.rotation.y=angle;tuft.castShadow=true;group.add(tuft)}
+    }else{
+      const industrial=["beam","slab","scaffold","pipeDeck","jumpDeck"].includes(kind);const bodyMat=new THREE.MeshStandardMaterial({color:industrial?(kind==="scaffold"?0xb9844f:0x5a5263):kind==="ruin"?0x8f786f:0x69758a,roughness:industrial?.58:.82,metalness:industrial?.24:.05,flatShading:true});
+      const body=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),bodyMat);body.position.y=.395;body.castShadow=body.receiveShadow=true;group.add(body);
+      const trim=new THREE.Mesh(new THREE.BoxGeometry(w+.08,.12,d+.08),new THREE.MeshStandardMaterial({color:kind==="jumpDeck"?0x69e6d1:kind==="pipeDeck"?0x3fb37a:new THREE.Color(color).multiplyScalar(.8),roughness:.5,metalness:.28}));trim.position.y=h/2+.42;trim.castShadow=true;group.add(trim);
+      if(kind==="scaffold"){const railMat=new THREE.MeshStandardMaterial({color:0xe5b56a,metalness:.45,roughness:.4});for(const side of [-1,1]){const rail=new THREE.Mesh(new THREE.CylinderGeometry(.045,.045,w,6),railMat);rail.rotation.z=Math.PI/2;rail.position.set(0,h/2+.72,side*d*.42);group.add(rail);for(const end of [-1,1]){const post=new THREE.Mesh(new THREE.CylinderGeometry(.045,.045,.65,6),railMat);post.position.set(end*w*.45,h/2+.68,side*d*.42);group.add(post)}}}
+      if(kind==="column"||kind==="bunker"){const band=new THREE.Mesh(new THREE.BoxGeometry(w+.16,.18,d+.16),topMat);band.position.y=.395;group.add(band)}
     }
     this.scene.add(group);
     // A tampa verde se projeta 0,395 unidade acima do volume rochoso.
     // O collider acompanha essa superfície visível para os pés não afundarem.
     this.world.createCollider(RAPIER.ColliderDesc.cuboid(w/2,h/2,d/2).setTranslation(x,y+.395,z));
-    if (index === 0 || index === 4 || index === 7) {
+    if (organic && (index === 7 || index === 15)) {
       for (let i=0;i<3;i++) this.addTree(x-w*.25+i*w*.22, y+h/2+.1, z+d*.28-(i%2)*1.2, .8+(i%2)*.2);
     }
   }
@@ -234,7 +219,7 @@ export class AuroraGame {
 
   private makeCoins() {
     const mat = new THREE.MeshStandardMaterial({color:0xffd45c,emissive:0xe59a25,emissiveIntensity:1.8,metalness:.65,roughness:.22});
-    this.coins = COIN_POSITIONS.map((p,i) => {
+    this.coins = this.level.coins.map((p,i) => {
       const group=new THREE.Group(); const ring=new THREE.Mesh(new THREE.TorusGeometry(.28,.09,8,18),mat); ring.castShadow=true; group.add(ring);
       const core=new THREE.Mesh(new THREE.OctahedronGeometry(.14),new THREE.MeshBasicMaterial({color:0xfff1a1}));group.add(core);
       group.position.set(...p); this.scene.add(group); return {mesh:group,position:new THREE.Vector3(...p),collected:false,phase:i*.7};
@@ -242,10 +227,30 @@ export class AuroraGame {
   }
 
   private makeEnemies() {
-    this.enemies = ENEMY_POSITIONS.map((p,i) => {
+    this.enemies = this.level.enemies.map((definition,i) => {
+      const p=definition.p;
       const rig=createGuardianModel(i);const group=rig.group;
-      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,rig,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0};
+      if(definition.shooter){const cannon=new THREE.Mesh(new THREE.CylinderGeometry(.13,.2,.65,8),new THREE.MeshStandardMaterial({color:0x263b62,metalness:.55,roughness:.3}));cannon.position.set(0,.72,.55);cannon.rotation.x=Math.PI/2;group.add(cannon)}
+      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,rig,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0,shooter:definition.shooter,lastShot:0};
     });
+  }
+
+  private makePipes(){
+    const green=new THREE.MeshStandardMaterial({color:0x3fb37a,roughness:.35,metalness:.18});
+    const dark=new THREE.MeshStandardMaterial({color:0x20725b,roughness:.48});
+    for(const pipe of this.level.pipes){
+      const [x,y,z]=pipe.p;const group=new THREE.Group();group.position.set(x,y,z);
+      const body=new THREE.Mesh(new THREE.CylinderGeometry(pipe.radius*.78,pipe.radius*.78,pipe.height,16),green);body.position.y=pipe.height/2;body.castShadow=body.receiveShadow=true;group.add(body);
+      const lip=new THREE.Mesh(new THREE.CylinderGeometry(pipe.radius,pipe.radius,.3,16),dark);lip.position.y=pipe.height;lip.castShadow=lip.receiveShadow=true;group.add(lip);this.scene.add(group);
+      this.world.createCollider(RAPIER.ColliderDesc.cylinder(pipe.height/2+.15,pipe.radius).setTranslation(x,y+pipe.height/2,z));
+    }
+  }
+
+  private makeCourseObstacles(){
+    const spikeMat=new THREE.MeshStandardMaterial({color:0xff765d,metalness:.3,roughness:.42,emissive:0x8d261e,emissiveIntensity:.45});
+    for(const hazard of this.level.hazards){const group=new THREE.Group();group.position.set(...hazard.p);for(let i=0;i<5;i++){const spike=new THREE.Mesh(new THREE.ConeGeometry(.13,.48,6),spikeMat);const a=i*Math.PI*2/5;spike.position.set(Math.cos(a)*.32,.24,Math.sin(a)*.32);spike.castShadow=true;group.add(spike)}group.userData.hazard=hazard;this.scene.add(group)}
+    const padMat=new THREE.MeshStandardMaterial({color:0x66ecd1,emissive:0x23bda9,emissiveIntensity:2.5,metalness:.32,roughness:.24});
+    for(const pad of this.level.jumpPads){const group=new THREE.Group();group.position.set(...pad.p);const base=new THREE.Mesh(new THREE.CylinderGeometry(.65,.72,.15,16),new THREE.MeshStandardMaterial({color:0x183d63,metalness:.5,roughness:.34}));group.add(base);const core=new THREE.Mesh(new THREE.CylinderGeometry(.46,.46,.17,16),padMat);core.position.y=.06;group.add(core);this.scene.add(group);this.jumpPads.push({mesh:group,position:new THREE.Vector3(...pad.p),power:pad.power,cooldown:0})}
   }
 
   private makeGoal() {
@@ -253,7 +258,7 @@ export class AuroraGame {
     for(let i=0;i<3;i++){const pillar=new THREE.Mesh(new THREE.CylinderGeometry(.14,.2,3.5,7),new THREE.MeshStandardMaterial({color:0xf7e9c8,roughness:.6}));const a=i*Math.PI*2/3;pillar.position.set(Math.cos(a)*.9,2,Math.sin(a)*.9);pillar.rotation.z=Math.cos(a)*.08;pillar.castShadow=true;this.goal.add(pillar)}
     const orb=new THREE.Mesh(new THREE.IcosahedronGeometry(.65,2),new THREE.MeshStandardMaterial({color:0x7995a3,emissive:0x253846,emissiveIntensity:.2,roughness:.2}));orb.name="orb";orb.position.y=3.5;this.goal.add(orb);
     const ring=new THREE.Mesh(new THREE.TorusGeometry(1.05,.06,8,32),new THREE.MeshBasicMaterial({color:0x778797,transparent:true,opacity:.45}));ring.name="ring";ring.position.y=3.5;ring.rotation.x=Math.PI/2;this.goal.add(ring);
-    this.goal.position.set(2,25,-10);this.scene.add(this.goal);
+    this.goal.position.set(...this.level.goal);this.scene.add(this.goal);
   }
 
   private makeParticles() {
@@ -286,7 +291,7 @@ export class AuroraGame {
 
   private update(dt:number) {
     if(this.pressed.has("escape")||this.consumePad(9)){this.callbacks.onPause();return;}
-    if(this.pressed.has("r")){this.yaw=.55;this.pitch=.42;}
+    if(this.pressed.has("r")){this.yaw=.55;this.pitch=.5;}
     this.attackTimer=Math.max(0,this.attackTimer-dt);this.hurtCooldown=Math.max(0,this.hurtCooldown-dt);
     const pad=this.getPad();const left=this.deadzone(pad?.axes[0]??0,pad?.axes[1]??0);
     let mx=left.x,my=left.y;
@@ -314,7 +319,7 @@ export class AuroraGame {
     this.world.step();const pos=this.playerBody.translation();this.player.position.set(pos.x,pos.y-.89,pos.z);
     this.animatePlayer(dt,move.length());
     if(attack&&this.attackTimer<=0)this.attack();
-    this.updateCoins(dt);this.updateEnemies(dt);this.updateGoal(dt);this.updateCamera(dt);this.updateAmbient(dt);
+    this.updateCoins(dt);this.updateEnemies(dt);this.updateProjectiles(dt);this.updateCourseObstacles(dt);this.updateGoal(dt);this.updateCamera(dt);this.updateAmbient(dt);
     if(pos.y<-8)this.die();
   }
 
@@ -327,7 +332,7 @@ export class AuroraGame {
 
   private updateCoins(dt:number) {
     const pickupCenter={x:this.player.position.x,y:this.player.position.y+.75,z:this.player.position.z};
-    for(const coin of this.coins){if(coin.collected)continue;coin.mesh.rotation.y+=dt*2.8;coin.mesh.position.y=coin.position.y+Math.sin(performance.now()*.0025+coin.phase)*.16;if(coinWithinPickup(pickupCenter,coin.mesh.position)){coin.collected=true;coin.mesh.visible=false;this.coinsCollected++;this.pulse(.18,45);this.callbacks.onToast(this.coinsCollected===COIN_POSITIONS.length?"Todos os fragmentos reunidos!":"Fragmento solar +1");this.emitSnapshot();this.checkUnlock();}}
+    for(const coin of this.coins){if(coin.collected)continue;coin.mesh.rotation.y+=dt*2.8;coin.mesh.position.y=coin.position.y+Math.sin(performance.now()*.0025+coin.phase)*.16;if(coinWithinPickup(pickupCenter,coin.mesh.position)){coin.collected=true;coin.mesh.visible=false;this.coinsCollected++;this.pulse(.18,45);this.callbacks.onToast(this.coinsCollected===this.level.coins.length?"Todos os fragmentos reunidos!":"Fragmento solar +1");this.emitSnapshot();this.checkUnlock();}}
   }
 
   private updateEnemies(dt:number) {
@@ -335,6 +340,7 @@ export class AuroraGame {
     for(const enemy of this.enemies){if(!enemy.alive)continue;enemy.hit=Math.max(0,enemy.hit-dt);const a=now*.72+enemy.phase;enemy.position.set(enemy.origin.x+Math.cos(a)*1.05,enemy.origin.y,enemy.origin.z+Math.sin(a)*1.05);enemy.mesh.position.copy(enemy.position);enemy.mesh.rotation.y=-a+.6;enemy.mesh.position.y+=Math.sin(now*3+enemy.phase)*.08;
       animateGuardianModel(enemy.rig,now,enemy.phase);
       const dx=this.player.position.x-enemy.position.x,dz=this.player.position.z-enemy.position.z,dist=Math.hypot(dx,dz);
+      if(enemy.shooter&&dist<14&&now-enemy.lastShot>Math.max(1.45,2.7-this.level.difficulty*.2)){enemy.lastShot=now;this.fireProjectile(enemy)}
       const enemyTop=enemy.mesh.position.y+.98;
       const contact=classifyEnemyContact({horizontalDistance:dist,playerFeetY:this.player.position.y-.04,enemyTopY:enemyTop,verticalVelocity:this.verticalVelocity});
       if(contact==="stomp"){
@@ -346,6 +352,26 @@ export class AuroraGame {
     }
   }
 
+  private fireProjectile(enemy:Enemy){
+    const mesh=new THREE.Mesh(new THREE.IcosahedronGeometry(.18,1),new THREE.MeshStandardMaterial({color:0xff875c,emissive:0xff3e28,emissiveIntensity:3,roughness:.2}));
+    mesh.position.copy(enemy.mesh.position).add(new THREE.Vector3(0,.72,0));this.scene.add(mesh);
+    const target=this.player.position.clone().add(new THREE.Vector3(0,.65,0));const velocity=target.sub(mesh.position).normalize().multiplyScalar(4.5+this.level.difficulty*.45);
+    this.projectiles.push({mesh,velocity,life:4.5});
+  }
+
+  private updateProjectiles(dt:number){
+    for(let i=this.projectiles.length-1;i>=0;i--){const shot=this.projectiles[i];shot.life-=dt;shot.mesh.position.addScaledVector(shot.velocity,dt);shot.mesh.rotation.x+=dt*7;shot.mesh.rotation.y+=dt*5;
+      if(shot.mesh.position.distanceTo(this.player.position.clone().add(new THREE.Vector3(0,.65,0)))<.72){if(this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.4;this.verticalVelocity=4.5;this.callbacks.onDamage();this.pulse(.75,160);this.emitSnapshot();if(this.health<=0)this.die()}shot.life=0}
+      if(shot.life<=0){this.scene.remove(shot.mesh);shot.mesh.geometry.dispose();(shot.mesh.material as THREE.Material).dispose();this.projectiles.splice(i,1)}
+    }
+  }
+
+  private updateCourseObstacles(dt:number){
+    const now=performance.now()*.002;
+    for(const object of this.scene.children){const hazard=object.userData.hazard as {p:number[];radius:number}|undefined;if(!hazard)continue;object.rotation.y+=dt*.55;const horizontal=Math.hypot(this.player.position.x-hazard.p[0],this.player.position.z-hazard.p[2]);if(horizontal<hazard.radius+.28&&Math.abs(this.player.position.y-hazard.p[1])<1&&this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.35;this.verticalVelocity=5;this.callbacks.onDamage();this.pulse(.8,170);this.emitSnapshot();if(this.health<=0)this.die()}}
+    for(const pad of this.jumpPads){pad.cooldown=Math.max(0,pad.cooldown-dt);pad.mesh.children[1].scale.setScalar(1+Math.sin(now*3)*.08);const horizontal=Math.hypot(this.player.position.x-pad.position.x,this.player.position.z-pad.position.z);if(horizontal<.78&&Math.abs(this.player.position.y-pad.position.y)<.75&&pad.cooldown<=0){pad.cooldown=.8;this.verticalVelocity=pad.power;this.grounded=false;this.jumpsRemaining=1;this.callbacks.onToast("Impulso da Aurora!");this.pulse(.45,95)}}
+  }
+
   private attack() {
     this.attackTimer=.42;this.pulse(.22,55);const forward=new THREE.Vector3(Math.sin(this.playerVisual.rotation.y),0,Math.cos(this.playerVisual.rotation.y));
     for(const enemy of this.enemies){if(!enemy.alive)continue;const delta=enemy.position.clone().sub(this.player.position);if(delta.length()<1.8&&delta.normalize().dot(forward)>.05){this.killEnemy(enemy,false);break;}}
@@ -355,16 +381,16 @@ export class AuroraGame {
     enemy.alive=false;enemy.mesh.visible=false;this.remainingEnemies--;this.pulse(.5,100);this.callbacks.onToast(stomp?"Salto perfeito!":"Guardião dispersado!");this.emitSnapshot();this.checkUnlock();
   }
 
-  private checkUnlock(){if(this.coinsCollected===COIN_POSITIONS.length&&this.remainingEnemies===0&&!this.goalUnlocked){this.goalUnlocked=true;this.callbacks.onToast("O Farol da Aurora despertou!");}}
+  private checkUnlock(){if(this.coinsCollected===this.level.coins.length&&this.remainingEnemies===0&&!this.goalUnlocked){this.goalUnlocked=true;this.callbacks.onToast("O Farol da Aurora despertou!");}}
 
   private updateGoal(dt:number) {
     const orb=this.goal.getObjectByName("orb") as THREE.Mesh;const ring=this.goal.getObjectByName("ring") as THREE.Mesh;ring.rotation.z+=dt*(this.goalUnlocked?1.8:.4);orb.rotation.y+=dt;
     const mat=orb.material as THREE.MeshStandardMaterial;if(this.goalUnlocked){mat.color.setHex(0xffe475);mat.emissive.setHex(0xffb52e);mat.emissiveIntensity=2.6;ring.material=(ring.material as THREE.MeshBasicMaterial);(ring.material as THREE.MeshBasicMaterial).color.setHex(0xffdc68);}
-    if(this.goalUnlocked&&this.player.position.distanceTo(new THREE.Vector3(2,25.5,-10))<2.2){this.paused=true;this.callbacks.onVictory();}
+    if(this.goalUnlocked&&this.player.position.distanceTo(new THREE.Vector3(...this.level.goal).add(new THREE.Vector3(0,.5,0)))<2.2){this.paused=true;this.callbacks.onVictory();}
   }
 
   private updateCamera(dt:number) {
-    const target=this.player.position.clone().add(new THREE.Vector3(0,1.25,0));const distance=8.7;const desired=target.clone().add(new THREE.Vector3(Math.sin(this.yaw)*Math.cos(this.pitch)*distance,Math.sin(this.pitch)*distance+1.1,Math.cos(this.yaw)*Math.cos(this.pitch)*distance));
+    const target=this.player.position.clone().add(new THREE.Vector3(0,1.25,0));const distance=10.6;const desired=target.clone().add(new THREE.Vector3(Math.sin(this.yaw)*Math.cos(this.pitch)*distance,Math.sin(this.pitch)*distance+1.1,Math.cos(this.yaw)*Math.cos(this.pitch)*distance));
     const alpha=1-Math.pow(.001,dt);this.camera.position.lerp(desired,alpha);this.camera.lookAt(target);
   }
 
@@ -390,15 +416,15 @@ export class AuroraGame {
   testVibration(){this.pulse(1,220)}
 
   reset() {
-    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=ENEMY_POSITIONS.length;this.verticalVelocity=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
-    this.playerBody.setNextKinematicTranslation({x:0,y:2.5,z:0});this.playerBody.setTranslation({x:0,y:2.5,z:0},true);this.player.position.set(0,1.61,0);
-    this.coins.forEach(c=>{c.collected=false;c.mesh.visible=true});this.enemies.forEach(e=>{e.alive=true;e.mesh.visible=true;e.position.copy(e.origin)});
+    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=this.level.enemies.length;this.verticalVelocity=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
+    const [sx,sy,sz]=this.level.spawn;this.playerBody.setNextKinematicTranslation({x:sx,y:sy,z:sz});this.playerBody.setTranslation({x:sx,y:sy,z:sz},true);this.player.position.set(sx,sy-.89,sz);
+    this.coins.forEach(c=>{c.collected=false;c.mesh.visible=true});this.enemies.forEach(e=>{e.alive=true;e.mesh.visible=true;e.position.copy(e.origin);e.lastShot=0});this.projectiles.forEach(p=>this.scene.remove(p.mesh));this.projectiles=[];
     const orb=this.goal.getObjectByName("orb") as THREE.Mesh;const mat=orb.material as THREE.MeshStandardMaterial;mat.color.setHex(0x7995a3);mat.emissive.setHex(0x253846);mat.emissiveIntensity=.2;
     this.emitSnapshot();
   }
 
   private die(){if(this.paused)return;this.paused=true;this.callbacks.onDeath()}
-  private emitSnapshot(){this.callbacks.onSnapshot({coins:this.coinsCollected,totalCoins:COIN_POSITIONS.length,health:this.health,enemies:this.remainingEnemies,totalEnemies:ENEMY_POSITIONS.length,gamepad:this.lastGamepadName})}
+  private emitSnapshot(){this.callbacks.onSnapshot({coins:this.coinsCollected,totalCoins:this.level.coins.length,health:this.health,enemies:this.remainingEnemies,totalEnemies:this.level.enemies.length,gamepad:this.lastGamepadName})}
   setPaused(value:boolean){this.paused=value;if(!value)this.clock.getDelta()}
 
   applySettings(settings:GameSettings) {
