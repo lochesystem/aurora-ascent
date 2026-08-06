@@ -6,6 +6,7 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { classifyEnemyContact, coinWithinPickup } from "./collision.js";
 import { generateLevel } from "./levels.js";
+import { landingInstability, movementResponse } from "./motion.js";
 import { animateGuardianModel, animatePlayerModel, createGuardianModel, createPlayerModel, type GuardianRig, type PlayerRig } from "./models";
 import type { GameSettings } from "./settings";
 
@@ -28,7 +29,7 @@ interface Callbacks {
 }
 
 type Coin = { mesh: THREE.Group; position: THREE.Vector3; collected: boolean; phase: number };
-type Enemy = { mesh: THREE.Group; rig: GuardianRig; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number; shooter:boolean; lastShot:number };
+type Enemy = { mesh: THREE.Group; rig: GuardianRig; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number; shooter:boolean; lastShot:number; patrol:number };
 type Projectile = { mesh:THREE.Mesh; velocity:THREE.Vector3; life:number };
 type JumpPad = { mesh:THREE.Group; position:THREE.Vector3; power:number; cooldown:number };
 
@@ -61,6 +62,8 @@ export class AuroraGame {
   private initialized = false;
   private destroyed = false;
   private verticalVelocity = 0;
+  private horizontalVelocity = new THREE.Vector3();
+  private balanceTimer = 0;
   private grounded = false;
   private jumpsRemaining = 2;
   private yaw = .55;
@@ -137,7 +140,7 @@ export class AuroraGame {
     sunBall.position.set(-55,52,-90); this.scene.add(sunBall);
 
     this.makeCloudSea();
-    this.level.platforms.forEach((item, i) => this.addIsland(item.p, item.s, item.c, i, item.kind));
+    this.level.platforms.forEach((item, i) => this.addIsland(item.p, item.s, item.c, i, item.kind, item.r));
     this.addBridgesAndDecor();
     this.makePipes();
     this.makeCourseObstacles();
@@ -154,10 +157,11 @@ export class AuroraGame {
     this.camera.position.set(9,8,12);
   }
 
-  private addIsland(position: readonly number[], size: readonly number[], color: number, index: number, kind="island") {
+  private addIsland(position: readonly number[], size: readonly number[], color: number, index: number, kind="island", rotation:readonly number[]=[0,0,0]) {
     const [x,y,z] = position, [w,h,d] = size;
     const group = new THREE.Group();
     group.position.set(x,y,z);
+    group.rotation.set(rotation[0]??0,rotation[1]??0,rotation[2]??0);
     const cliffMat = new THREE.MeshStandardMaterial({color: index % 2 ? 0x8b6c7c : 0x75657d, roughness:.88, flatShading:true});
     const topMat = new THREE.MeshStandardMaterial({color, roughness:.76, flatShading:true});
     const organic=kind==="island"||kind==="small";
@@ -176,7 +180,9 @@ export class AuroraGame {
     this.scene.add(group);
     // A tampa verde se projeta 0,395 unidade acima do volume rochoso.
     // O collider acompanha essa superfície visível para os pés não afundarem.
-    this.world.createCollider(RAPIER.ColliderDesc.cuboid(w/2,h/2,d/2).setTranslation(x,y+.395,z));
+    const quaternion=new THREE.Quaternion().setFromEuler(new THREE.Euler(rotation[0]??0,rotation[1]??0,rotation[2]??0));
+    const colliderCenter=new THREE.Vector3(0,.395,0).applyQuaternion(quaternion).add(new THREE.Vector3(x,y,z));
+    this.world.createCollider(RAPIER.ColliderDesc.cuboid(w/2,h/2,d/2).setTranslation(colliderCenter.x,colliderCenter.y,colliderCenter.z).setRotation({x:quaternion.x,y:quaternion.y,z:quaternion.z,w:quaternion.w}));
     if (organic && (index === 7 || index === 15)) {
       for (let i=0;i<3;i++) this.addTree(x-w*.25+i*w*.22, y+h/2+.1, z+d*.28-(i%2)*1.2, .8+(i%2)*.2);
     }
@@ -231,7 +237,7 @@ export class AuroraGame {
       const p=definition.p;
       const rig=createGuardianModel(i);const group=rig.group;
       if(definition.shooter){const cannon=new THREE.Mesh(new THREE.CylinderGeometry(.13,.2,.65,8),new THREE.MeshStandardMaterial({color:0x263b62,metalness:.55,roughness:.3}));cannon.position.set(0,.72,.55);cannon.rotation.x=Math.PI/2;group.add(cannon)}
-      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,rig,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0,shooter:definition.shooter,lastShot:0};
+      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,rig,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0,shooter:definition.shooter,lastShot:0,patrol:definition.patrol};
     });
   }
 
@@ -292,7 +298,7 @@ export class AuroraGame {
   private update(dt:number) {
     if(this.pressed.has("escape")||this.consumePad(9)){this.callbacks.onPause();return;}
     if(this.pressed.has("r")){this.yaw=.55;this.pitch=.5;}
-    this.attackTimer=Math.max(0,this.attackTimer-dt);this.hurtCooldown=Math.max(0,this.hurtCooldown-dt);
+    this.attackTimer=Math.max(0,this.attackTimer-dt);this.hurtCooldown=Math.max(0,this.hurtCooldown-dt);this.balanceTimer=Math.max(0,this.balanceTimer-dt);
     const pad=this.getPad();const left=this.deadzone(pad?.axes[0]??0,pad?.axes[1]??0);
     let mx=left.x,my=left.y;
     if(this.keys.has("a")||this.keys.has("arrowleft"))mx-=1;if(this.keys.has("d")||this.keys.has("arrowright"))mx+=1;
@@ -303,21 +309,25 @@ export class AuroraGame {
     if(this.grounded)this.jumpsRemaining=2;
     if(jump&&this.jumpsRemaining>0){
       const isDoubleJump=this.jumpsRemaining===1;
-      this.verticalVelocity=isDoubleJump?9.4:10.8;
+      this.verticalVelocity=isDoubleJump?9.15:10.65;
       this.jumpsRemaining--;
       this.grounded=false;
       this.playerVisual.rotation.x=isDoubleJump?-.55:-.18;
       this.pulse(isDoubleJump?.42:.28,isDoubleJump?95:70);
     }
-    this.verticalVelocity+=-25*dt;
+    this.verticalVelocity+=-27*dt;
     const forward=new THREE.Vector3(-Math.sin(this.yaw),0,-Math.cos(this.yaw));const right=new THREE.Vector3(Math.cos(this.yaw),0,-Math.sin(this.yaw));
     const move=forward.multiplyScalar(-my).add(right.multiplyScalar(mx));if(move.lengthSq()>.001){move.normalize();this.playerVisual.rotation.y=THREE.MathUtils.lerp(this.playerVisual.rotation.y,Math.atan2(move.x,move.z),.18);}
-    const speed=this.grounded?6.8:5.3;const desired={x:move.x*speed*dt,y:this.verticalVelocity*dt,z:move.z*speed*dt};
+    const wasGrounded=this.grounded;const impactSpeed=Math.max(0,-this.verticalVelocity);const response=movementResponse(this.grounded,this.balanceTimer>0);const target=move.clone().multiplyScalar(response.maxSpeed);const blend=1-Math.exp(-response.acceleration*dt);
+    if(move.lengthSq()>.001)this.horizontalVelocity.lerp(target,blend);else this.horizontalVelocity.multiplyScalar(Math.exp(-response.drag*dt));
+    const desired={x:this.horizontalVelocity.x*dt,y:this.verticalVelocity*dt,z:this.horizontalVelocity.z*dt};
     this.character.computeColliderMovement(this.playerCollider,desired,undefined,undefined,(collider)=>collider!==this.playerCollider);
     const actual=this.character.computedMovement();const t=this.playerBody.translation();this.playerBody.setNextKinematicTranslation({x:t.x+actual.x,y:t.y+actual.y,z:t.z+actual.z});
-    this.grounded=this.character.computedGrounded();if(this.grounded&&this.verticalVelocity<0)this.verticalVelocity=-.5;
+    this.grounded=this.character.computedGrounded();
+    if(this.grounded&&!wasGrounded){const instability=landingInstability(impactSpeed,this.horizontalVelocity.length());if(instability>0){this.balanceTimer=instability;const side=new THREE.Vector3(-this.horizontalVelocity.z,0,this.horizontalVelocity.x);if(side.lengthSq()<.02)side.set(Math.cos(this.yaw),0,-Math.sin(this.yaw));side.normalize().multiplyScalar((.55+instability*1.35)*(Math.sin(this.playerBody.translation().x*2.7+this.playerBody.translation().z)>0?1:-1));this.horizontalVelocity.add(side);this.pulse(.25+instability*.35,70+instability*130);if(instability>.42)this.callbacks.onToast("Aterrissagem instável — recupere o equilíbrio!");}}
+    if(this.grounded&&this.verticalVelocity<0)this.verticalVelocity=-.5;
     this.world.step();const pos=this.playerBody.translation();this.player.position.set(pos.x,pos.y-.89,pos.z);
-    this.animatePlayer(dt,move.length());
+    this.animatePlayer(dt,this.horizontalVelocity.length());
     if(attack&&this.attackTimer<=0)this.attack();
     this.updateCoins(dt);this.updateEnemies(dt);this.updateProjectiles(dt);this.updateCourseObstacles(dt);this.updateGoal(dt);this.updateCamera(dt);this.updateAmbient(dt);
     if(pos.y<-8)this.die();
@@ -325,7 +335,7 @@ export class AuroraGame {
 
   private animatePlayer(dt:number,speed:number) {
     const t=performance.now()*.009;this.playerVisual.position.y=this.grounded?Math.abs(Math.sin(t))*speed*.06:0;
-    this.playerVisual.rotation.z=THREE.MathUtils.lerp(this.playerVisual.rotation.z,this.attackTimer>.2?-.35:0,.18);
+    const balanceLean=this.balanceTimer>0?Math.sin(performance.now()*.028)*Math.min(.34,.12+this.balanceTimer*.36):0;this.playerVisual.rotation.z=THREE.MathUtils.lerp(this.playerVisual.rotation.z,this.attackTimer>.2?-.35:balanceLean,.18);
     if(!this.grounded)this.playerVisual.rotation.x=THREE.MathUtils.lerp(this.playerVisual.rotation.x,-.12,.12);else this.playerVisual.rotation.x*=.82;
     animatePlayerModel(this.playerRig,t,speed,this.grounded,this.verticalVelocity,this.attackTimer>.12);
   }
@@ -337,7 +347,7 @@ export class AuroraGame {
 
   private updateEnemies(dt:number) {
     const now=performance.now()*.001;
-    for(const enemy of this.enemies){if(!enemy.alive)continue;enemy.hit=Math.max(0,enemy.hit-dt);const a=now*.72+enemy.phase;enemy.position.set(enemy.origin.x+Math.cos(a)*1.05,enemy.origin.y,enemy.origin.z+Math.sin(a)*1.05);enemy.mesh.position.copy(enemy.position);enemy.mesh.rotation.y=-a+.6;enemy.mesh.position.y+=Math.sin(now*3+enemy.phase)*.08;
+    for(const enemy of this.enemies){if(!enemy.alive)continue;enemy.hit=Math.max(0,enemy.hit-dt);const a=now*.72+enemy.phase;enemy.position.set(enemy.origin.x+Math.cos(a)*enemy.patrol,enemy.origin.y,enemy.origin.z+Math.sin(a)*enemy.patrol);enemy.mesh.position.copy(enemy.position);enemy.mesh.rotation.y=-a+.6;enemy.mesh.position.y+=Math.sin(now*3+enemy.phase)*.08;
       animateGuardianModel(enemy.rig,now,enemy.phase);
       const dx=this.player.position.x-enemy.position.x,dz=this.player.position.z-enemy.position.z,dist=Math.hypot(dx,dz);
       if(enemy.shooter&&dist<14&&now-enemy.lastShot>Math.max(1.45,2.7-this.level.difficulty*.2)){enemy.lastShot=now;this.fireProjectile(enemy)}
@@ -416,7 +426,7 @@ export class AuroraGame {
   testVibration(){this.pulse(1,220)}
 
   reset() {
-    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=this.level.enemies.length;this.verticalVelocity=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
+    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=this.level.enemies.length;this.verticalVelocity=0;this.horizontalVelocity.set(0,0,0);this.balanceTimer=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
     const [sx,sy,sz]=this.level.spawn;this.playerBody.setNextKinematicTranslation({x:sx,y:sy,z:sz});this.playerBody.setTranslation({x:sx,y:sy,z:sz},true);this.player.position.set(sx,sy-.89,sz);
     this.coins.forEach(c=>{c.collected=false;c.mesh.visible=true});this.enemies.forEach(e=>{e.alive=true;e.mesh.visible=true;e.position.copy(e.origin);e.lastShot=0});this.projectiles.forEach(p=>this.scene.remove(p.mesh));this.projectiles=[];
     const orb=this.goal.getObjectByName("orb") as THREE.Mesh;const mat=orb.material as THREE.MeshStandardMaterial;mat.color.setHex(0x7995a3);mat.emissive.setHex(0x253846);mat.emissiveIntensity=.2;

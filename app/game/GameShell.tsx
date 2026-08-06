@@ -100,7 +100,7 @@ export default function GameShell() {
           <div className="hud-card"><div><span className="hud-label">Guardiões</span><strong className="hud-value">{snapshot.totalEnemies - snapshot.enemies} / {snapshot.totalEnemies}</strong></div></div>
         </div>
         <div className={`gamepad-pill ${snapshot.gamepad ? "connected" : ""}`}><i/>{snapshot.gamepad || "Controle não conectado"}</div>
-        <div className="hud-bottom"><span className="prompt"><b className="key">Espaço ×2</b> Pulo duplo</span><span className="prompt"><b className="key">F</b> Golpear</span><span className="prompt"><b className="key">Esc</b> Pausar</span></div>
+        <div className="hud-bottom"><span className="prompt"><b className="key">Espaço ×2</b> Pulo duplo</span><span className="prompt"><b className="key">⚠</b> Pousos fortes derrapam</span><span className="prompt"><b className="key">F</b> Golpear</span><span className="prompt"><b className="key">Esc</b> Pausar</span></div>
       </div>
 
       <div className={`toast ${toast ? "show" : ""}`}>{toast}</div>
