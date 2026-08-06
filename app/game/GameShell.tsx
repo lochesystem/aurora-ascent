@@ -1,0 +1,142 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AuroraGame, type GameSnapshot } from "./engine";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type GameSettings } from "./settings";
+
+type Screen = "title" | "playing" | "paused" | "dead" | "victory";
+const EMPTY: GameSnapshot = { coins: 0, totalCoins: 18, health: 3, enemies: 5, totalEnemies: 5, gamepad: "" };
+
+export default function GameShell() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gameRef = useRef<AuroraGame | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [screen, setScreen] = useState<Screen>("title");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"video" | "controls" | "controller">("video");
+  const [settings, setSettings] = useState<GameSettings>(DEFAULT_SETTINGS);
+  const [snapshot, setSnapshot] = useState<GameSnapshot>(EMPTY);
+  const [toast, setToast] = useState("");
+  const [damageFlash, setDamageFlash] = useState(false);
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 1700);
+  }, []);
+
+  useEffect(() => {
+    setSettings(loadSettings());
+    if (!canvasRef.current) return;
+    const game = new AuroraGame(canvasRef.current, {
+      onSnapshot: setSnapshot,
+      onDeath: () => setScreen("dead"),
+      onVictory: () => setScreen("victory"),
+      onToast: showToast,
+      onDamage: () => {
+        setDamageFlash(false);
+        requestAnimationFrame(() => setDamageFlash(true));
+      },
+      onPause: () => setScreen((current) => current === "playing" ? "paused" : current),
+    });
+    gameRef.current = game;
+    void game.init(loadSettings());
+    return () => { game.destroy(); gameRef.current = null; };
+  }, [showToast]);
+
+  useEffect(() => {
+    gameRef.current?.setPaused(screen !== "playing");
+  }, [screen]);
+
+  const updateSettings = (patch: Partial<GameSettings>) => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      saveSettings(next);
+      gameRef.current?.applySettings(next);
+      return next;
+    });
+  };
+
+  const startGame = () => {
+    gameRef.current?.reset();
+    setScreen("playing");
+    setSettingsOpen(false);
+    showToast("Alcance o Farol da Aurora");
+    canvasRef.current?.focus();
+  };
+
+  const resume = () => {
+    setSettingsOpen(false);
+    setScreen("playing");
+    canvasRef.current?.focus();
+  };
+
+  const openSettings = (from: Screen = screen) => {
+    if (from === "playing") setScreen("paused");
+    setSettingsOpen(true);
+  };
+
+  return (
+    <main className="game-root">
+      <canvas ref={canvasRef} className="game-canvas" tabIndex={0} aria-label="Aurora Ascent, jogo de plataforma 3D" />
+
+      <div className={`hud ${screen !== "playing" ? "hidden" : ""}`} aria-live="polite">
+        <div className="hud-top">
+          <div className="hud-cluster">
+            <div className="hud-card"><div className="coin-glyph"/><div><span className="hud-label">Fragmentos</span><strong className="hud-value">{String(snapshot.coins).padStart(2,"0")} / {snapshot.totalCoins}</strong></div></div>
+            <div className="hud-card"><div className="hearts">{[0,1,2].map(i => <span key={i} className={`heart ${i >= snapshot.health ? "empty" : ""}`}>♥</span>)}</div></div>
+          </div>
+          <div className="objective hud-card"><div style={{width:"100%"}}><span className="hud-label">Objetivo atual</span><strong>{snapshot.coins < snapshot.totalCoins ? "Colete todos os fragmentos" : snapshot.enemies > 0 ? "Derrote os guardiões" : "Suba ao farol"}</strong><div className="progress"><i style={{width:`${(snapshot.coins / snapshot.totalCoins) * 100}%`}}/></div></div></div>
+          <div className="hud-card"><div><span className="hud-label">Guardiões</span><strong className="hud-value">{snapshot.totalEnemies - snapshot.enemies} / {snapshot.totalEnemies}</strong></div></div>
+        </div>
+        <div className={`gamepad-pill ${snapshot.gamepad ? "connected" : ""}`}><i/>{snapshot.gamepad || "Controle não conectado"}</div>
+        <div className="hud-bottom"><span className="prompt"><b className="key">Espaço ×2</b> Pulo duplo</span><span className="prompt"><b className="key">F</b> Golpear</span><span className="prompt"><b className="key">Esc</b> Pausar</span></div>
+      </div>
+
+      <div className={`toast ${toast ? "show" : ""}`}>{toast}</div>
+      <div className={`damage-flash ${damageFlash ? "show" : ""}`} onAnimationEnd={() => setDamageFlash(false)}/>
+
+      <section className={`screen title-screen ${screen !== "title" ? "hidden" : ""}`}>
+        <div className="title-card">
+          <p className="eyebrow">Uma aventura acima das nuvens</p>
+          <h1>Aurora <span>Ascent</span></h1>
+          <p className="tagline">Os fragmentos solares se espalharam pelas ilhas do céu. Corra, salte e lute até o farol antes que a última luz desapareça.</p>
+          <div className="menu-actions"><button className="primary-btn" onClick={startGame}>Iniciar jornada</button><button className="secondary-btn" onClick={() => openSettings("title")}>Configurações</button></div>
+          <div className="controls-strip"><span><b className="key">WASD</b> mover</span><span><b className="key">Mouse</b> câmera</span><span><b className="key">F</b> ataque</span><span><b className="key">✕</b> DualSense</span></div>
+        </div>
+      </section>
+
+      {screen === "paused" && !settingsOpen && <div className="modal-backdrop"><div className="pause-card"><p className="eyebrow" style={{justifyContent:"center"}}>Jornada suspensa</p><h2>Pausado</h2><p>Respire. As ilhas continuarão aqui.</p><div className="menu-actions"><button className="primary-btn" onClick={resume}>Continuar</button><button className="secondary-btn" onClick={() => openSettings("paused")}>Configurações</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+
+      {screen === "dead" && <div className="modal-backdrop death-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A névoa levou sua luz</p><h2>Você caiu</h2><p>A expedição recomeça do início: fragmentos, guardiões e plataformas foram restaurados.</p><div className="menu-actions"><button className="primary-btn" onClick={startGame}>Tentar novamente</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+
+      {screen === "victory" && <div className="modal-backdrop victory-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A luz atravessa as nuvens</p><h2>Farol liberto!</h2><p>Você reuniu os {snapshot.totalCoins} fragmentos e derrotou todos os guardiões da ilha.</p><div className="menu-actions"><button className="primary-btn" onClick={startGame}>Jogar novamente</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+
+      <div className={`modal-backdrop ${settingsOpen ? "" : "hidden"}`}>
+        <div className="modal" role="dialog" aria-modal="true" aria-label="Configurações">
+          <div className="modal-header"><div><p className="eyebrow">Personalize sua jornada</p><h2>Configurações</h2></div><button className="icon-btn" aria-label="Fechar" onClick={() => { setSettingsOpen(false); if (screen === "title") return; }}>×</button></div>
+          <div className="settings-tabs">{([['video','Vídeo'],['controls','Controles'],['controller','DualSense']] as const).map(([id,label]) => <button key={id} className={`tab ${settingsTab === id ? "active" : ""}`} onClick={() => setSettingsTab(id)}>{label}</button>)}</div>
+          <div className={`settings-panel ${settingsTab === "video" ? "active" : ""}`}>
+            <div className="setting-row"><div><label>Qualidade visual</label><small>Altera resolução, sombras e densidade de partículas.</small></div><select value={settings.quality} onChange={e => updateSettings({quality:e.target.value as GameSettings['quality']})}><option value="low">Desempenho</option><option value="medium">Equilibrado</option><option value="high">Cinemático</option></select></div>
+            <div className="setting-row"><div><span className="setting-title">Sombras dinâmicas</span><small>Profundidade extra para personagens e plataformas.</small></div><label className="toggle"><input type="checkbox" checked={settings.shadows} onChange={e => updateSettings({shadows:e.target.checked})}/><i/></label></div>
+            <div className="setting-row"><div><span className="setting-title">Brilho mágico</span><small>Realça fragmentos, farol e energia dos golpes.</small></div><label className="toggle"><input type="checkbox" checked={settings.bloom} onChange={e => updateSettings({bloom:e.target.checked})}/><i/></label></div>
+          </div>
+          <div className={`settings-panel ${settingsTab === "controls" ? "active" : ""}`}>
+            <div className="setting-row"><div><label>Sensibilidade da câmera</label><small>{Math.round(settings.cameraSensitivity*100)}%</small></div><input aria-label="Sensibilidade da câmera" type="range" min="30" max="150" value={settings.cameraSensitivity*100} onChange={e => updateSettings({cameraSensitivity:Number(e.target.value)/100})}/></div>
+            <div className="setting-row"><div><span className="setting-title">Inverter eixo vertical</span><small>Inverte o movimento vertical da câmera.</small></div><label className="toggle"><input type="checkbox" checked={settings.invertY} onChange={e => updateSettings({invertY:e.target.checked})}/><i/></label></div>
+            <div className="mapping-grid"><div className="mapping"><b className="key">WASD</b> Movimento</div><div className="mapping"><b className="key">Espaço ×2</b> Pulo duplo</div><div className="mapping"><b className="key">F / Click</b> Golpear</div><div className="mapping"><b className="key">Mouse</b> Girar câmera</div><div className="mapping"><b className="key">Esc</b> Pausar</div><div className="mapping"><b className="key">R</b> Recentrar câmera</div></div>
+          </div>
+          <div className={`settings-panel ${settingsTab === "controller" ? "active" : ""}`}>
+            <div className={`controller-status ${snapshot.gamepad ? "connected" : ""}`}>{snapshot.gamepad || "Pressione um botão no controle para conectar"}</div>
+            <div className="setting-row"><div><span className="setting-title">Controle habilitado</span><small>Compatível com DualSense e controles padrão.</small></div><label className="toggle"><input type="checkbox" checked={settings.gamepadEnabled} onChange={e => updateSettings({gamepadEnabled:e.target.checked})}/><i/></label></div>
+            <div className="setting-row"><div><label>Zona morta dos analógicos</label><small>{Math.round(settings.deadzone*100)}%</small></div><input aria-label="Zona morta" type="range" min="5" max="50" value={settings.deadzone*100} onChange={e => updateSettings({deadzone:Number(e.target.value)/100})}/></div>
+            <div className="setting-row"><div><label>Intensidade da vibração</label><small>{Math.round(settings.vibration*100)}%</small></div><input aria-label="Vibração" type="range" min="0" max="100" value={settings.vibration*100} onChange={e => updateSettings({vibration:Number(e.target.value)/100})}/></div>
+            <div className="mapping-grid"><div className="mapping"><b className="key">✕ ×2</b> Pulo duplo</div><div className="mapping"><b className="pad-key">□</b> Golpear</div><div className="mapping"><b className="pad-key">L</b> Movimento</div><div className="mapping"><b className="pad-key">R</b> Câmera</div><div className="mapping"><b className="pad-key">R2</b> Golpear</div><div className="mapping"><b className="pad-key">☰</b> Pausar</div></div>
+            <div className="menu-actions" style={{marginTop:18}}><button className="secondary-btn" onClick={() => gameRef.current?.testVibration()}>Testar vibração</button></div>
+          </div>
+          <div className="settings-footer"><button className="secondary-btn" onClick={() => updateSettings(DEFAULT_SETTINGS)}>Restaurar padrão</button><button className="primary-btn" onClick={() => { setSettingsOpen(false); if (screen === "paused") resume(); }}>Concluir</button></div>
+        </div>
+      </div>
+    </main>
+  );
+}
