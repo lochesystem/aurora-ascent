@@ -80,6 +80,14 @@ test("nenhum inimigo patrulha sob blocos ou em apoios estreitos",()=>{
   }
 });
 
+test("a plataforma inicial é uma zona segura sem inimigos",()=>{
+  for(let number=1;number<=25;number++){
+    const level=generateLevel(number);const start=level.platforms[0];const top=start.p[1]+.395+start.s[1]/2;
+    const enemiesAtStart=level.enemies.filter(enemy=>Math.abs(enemy.p[1]-(top+.085))<.05&&Math.abs(enemy.p[0]-start.p[0])<=start.s[0]/2&&Math.abs(enemy.p[2]-start.p[2])<=start.s[2]/2);
+    assert.deepEqual(enemiesAtStart,[],`fase ${number} tem inimigo na área inicial`);
+  }
+});
+
 test("a dificuldade geométrica cresce ao longo da campanha",()=>{
   const metric=number=>{const level=generateLevel(number);const gaps=level.platforms.slice(1).map((platform,index)=>{const previous=level.platforms[index];return Math.hypot(platform.p[0]-previous.p[0],platform.p[2]-previous.p[2])-(Math.min(platform.s[0],platform.s[2])+Math.min(previous.s[0],previous.s[2]))/2});const widths=level.platforms.slice(1).map(platform=>Math.min(platform.s[0],platform.s[2]));return {gap:gaps.reduce((sum,value)=>sum+value,0)/gaps.length,width:widths.reduce((sum,value)=>sum+value,0)/widths.length,tilt:Math.max(...level.platforms.flatMap(platform=>platform.r.map(Math.abs))),enemies:level.enemies.length,challenge:level.challenge}};
   const average=(numbers,key)=>numbers.map(number=>metric(number)[key]).reduce((sum,value)=>sum+value,0)/numbers.length;

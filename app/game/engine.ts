@@ -4,9 +4,9 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
-import { classifyEnemyContact, coinWithinPickup } from "./collision.js";
+import { classifyEnemyContact, coinWithinPickup, segmentSphereHitFraction } from "./collision.js";
 import { generateLevel } from "./levels.js";
-import { landingInstability, movementResponse } from "./motion.js";
+import { landingInstability, movementResponse, stepPlanarVelocity } from "./motion.js";
 import { animateGuardianModel, animatePlayerModel, createGuardianModel, createPlayerModel, type GuardianRig, type PlayerRig } from "./models";
 import type { GameSettings } from "./settings";
 
@@ -64,6 +64,7 @@ export class AuroraGame {
   private verticalVelocity = 0;
   private horizontalVelocity = new THREE.Vector3();
   private balanceTimer = 0;
+  private driftLean = 0;
   private grounded = false;
   private jumpsRemaining = 2;
   private yaw = .55;
@@ -79,6 +80,7 @@ export class AuroraGame {
   private goalUnlocked = false;
   private listeners: Array<() => void> = [];
   private projectiles: Projectile[] = [];
+  private projectileShape = new RAPIER.Ball(.18);
   private jumpPads: JumpPad[] = [];
   private level: ReturnType<typeof generateLevel>;
 
@@ -318,8 +320,8 @@ export class AuroraGame {
     this.verticalVelocity+=-27*dt;
     const forward=new THREE.Vector3(-Math.sin(this.yaw),0,-Math.cos(this.yaw));const right=new THREE.Vector3(Math.cos(this.yaw),0,-Math.sin(this.yaw));
     const move=forward.multiplyScalar(-my).add(right.multiplyScalar(mx));if(move.lengthSq()>.001){move.normalize();this.playerVisual.rotation.y=THREE.MathUtils.lerp(this.playerVisual.rotation.y,Math.atan2(move.x,move.z),.18);}
-    const wasGrounded=this.grounded;const impactSpeed=Math.max(0,-this.verticalVelocity);const response=movementResponse(this.grounded,this.balanceTimer>0);const target=move.clone().multiplyScalar(response.maxSpeed);const blend=1-Math.exp(-response.acceleration*dt);
-    if(move.lengthSq()>.001)this.horizontalVelocity.lerp(target,blend);else this.horizontalVelocity.multiplyScalar(Math.exp(-response.drag*dt));
+    const wasGrounded=this.grounded;const impactSpeed=Math.max(0,-this.verticalVelocity);const response=movementResponse(this.grounded,this.balanceTimer>0);const velocity=stepPlanarVelocity({x:this.horizontalVelocity.x,z:this.horizontalVelocity.z},{x:move.x,z:move.z},dt,this.grounded,this.balanceTimer>0);this.horizontalVelocity.set(velocity.x,0,velocity.z);
+    const visualRight=new THREE.Vector3(Math.cos(this.playerVisual.rotation.y),0,-Math.sin(this.playerVisual.rotation.y));this.driftLean=THREE.MathUtils.clamp(-this.horizontalVelocity.dot(visualRight)/Math.max(1,response.maxSpeed)*.28,-.24,.24);
     const desired={x:this.horizontalVelocity.x*dt,y:this.verticalVelocity*dt,z:this.horizontalVelocity.z*dt};
     this.character.computeColliderMovement(this.playerCollider,desired,undefined,undefined,(collider)=>collider!==this.playerCollider);
     const actual=this.character.computedMovement();const t=this.playerBody.translation();this.playerBody.setNextKinematicTranslation({x:t.x+actual.x,y:t.y+actual.y,z:t.z+actual.z});
@@ -335,7 +337,7 @@ export class AuroraGame {
 
   private animatePlayer(dt:number,speed:number) {
     const t=performance.now()*.009;this.playerVisual.position.y=this.grounded?Math.abs(Math.sin(t))*speed*.06:0;
-    const balanceLean=this.balanceTimer>0?Math.sin(performance.now()*.028)*Math.min(.34,.12+this.balanceTimer*.36):0;this.playerVisual.rotation.z=THREE.MathUtils.lerp(this.playerVisual.rotation.z,this.attackTimer>.2?-.35:balanceLean,.18);
+    const balanceLean=this.balanceTimer>0?Math.sin(performance.now()*.028)*Math.min(.34,.12+this.balanceTimer*.36):this.driftLean;this.playerVisual.rotation.z=THREE.MathUtils.lerp(this.playerVisual.rotation.z,this.attackTimer>.2?-.35:balanceLean,.18);
     if(!this.grounded)this.playerVisual.rotation.x=THREE.MathUtils.lerp(this.playerVisual.rotation.x,-.12,.12);else this.playerVisual.rotation.x*=.82;
     animatePlayerModel(this.playerRig,t,speed,this.grounded,this.verticalVelocity,this.attackTimer>.12);
   }
@@ -370,8 +372,12 @@ export class AuroraGame {
   }
 
   private updateProjectiles(dt:number){
-    for(let i=this.projectiles.length-1;i>=0;i--){const shot=this.projectiles[i];shot.life-=dt;shot.mesh.position.addScaledVector(shot.velocity,dt);shot.mesh.rotation.x+=dt*7;shot.mesh.rotation.y+=dt*5;
-      if(shot.mesh.position.distanceTo(this.player.position.clone().add(new THREE.Vector3(0,.65,0)))<.72){if(this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.4;this.verticalVelocity=4.5;this.callbacks.onDamage();this.pulse(.75,160);this.emitSnapshot();if(this.health<=0)this.die()}shot.life=0}
+    for(let i=this.projectiles.length-1;i>=0;i--){const shot=this.projectiles[i];shot.life-=dt;const start=shot.mesh.position.clone();const movement=shot.velocity.clone().multiplyScalar(dt);const end=start.clone().add(movement);shot.mesh.rotation.x+=dt*7;shot.mesh.rotation.y+=dt*5;
+      const worldHit=this.world.castShape(start,{x:0,y:0,z:0,w:1},movement,this.projectileShape,0,1,false,undefined,undefined,this.playerCollider);
+      const playerCenter=this.player.position.clone().add(new THREE.Vector3(0,.65,0));const playerHit=segmentSphereHitFraction(start,end,playerCenter,.72);const worldHitTime=worldHit?.time_of_impact??Infinity;
+      if(playerHit!==null&&playerHit<worldHitTime){shot.mesh.position.copy(start).addScaledVector(movement,playerHit);if(this.hurtCooldown<=0){this.health--;this.hurtCooldown=1.4;this.verticalVelocity=4.5;this.callbacks.onDamage();this.pulse(.75,160);this.emitSnapshot();if(this.health<=0)this.die()}shot.life=0}
+      else if(worldHitTime<=1){shot.mesh.position.copy(start).addScaledVector(movement,Math.max(0,worldHitTime));shot.life=0}
+      else shot.mesh.position.copy(end);
       if(shot.life<=0){this.scene.remove(shot.mesh);shot.mesh.geometry.dispose();(shot.mesh.material as THREE.Material).dispose();this.projectiles.splice(i,1)}
     }
   }
@@ -426,7 +432,7 @@ export class AuroraGame {
   testVibration(){this.pulse(1,220)}
 
   reset() {
-    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=this.level.enemies.length;this.verticalVelocity=0;this.horizontalVelocity.set(0,0,0);this.balanceTimer=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
+    if(!this.world)return;this.coinsCollected=0;this.health=3;this.remainingEnemies=this.level.enemies.length;this.verticalVelocity=0;this.horizontalVelocity.set(0,0,0);this.balanceTimer=0;this.driftLean=0;this.grounded=false;this.jumpsRemaining=2;this.goalUnlocked=false;this.attackTimer=0;this.hurtCooldown=0;
     const [sx,sy,sz]=this.level.spawn;this.playerBody.setNextKinematicTranslation({x:sx,y:sy,z:sz});this.playerBody.setTranslation({x:sx,y:sy,z:sz},true);this.player.position.set(sx,sy-.89,sz);
     this.coins.forEach(c=>{c.collected=false;c.mesh.visible=true});this.enemies.forEach(e=>{e.alive=true;e.mesh.visible=true;e.position.copy(e.origin);e.lastShot=0});this.projectiles.forEach(p=>this.scene.remove(p.mesh));this.projectiles=[];
     const orb=this.goal.getObjectByName("orb") as THREE.Mesh;const mat=orb.material as THREE.MeshStandardMaterial;mat.color.setHex(0x7995a3);mat.emissive.setHex(0x253846);mat.emissiveIntensity=.2;

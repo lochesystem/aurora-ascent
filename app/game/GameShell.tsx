@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuroraGame, type GameSnapshot } from "./engine";
 import { CAMPAIGN_LEVELS, generateLevel } from "./levels.js";
+import { findNextSpatialIndex, gamepadMenuDirection } from "./menuNavigation.js";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type GameSettings } from "./settings";
 
 type Screen = "title" | "map" | "playing" | "paused" | "dead" | "victory";
 const EMPTY: GameSnapshot = { coins: 0, totalCoins: 7, health: 3, enemies: 2, totalEnemies: 2, gamepad: "" };
 
 export default function GameShell() {
+  const rootRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<AuroraGame | null>(null);
+  const menuButtonsRef = useRef(new Set<number>());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [screen, setScreen] = useState<Screen>("title");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -85,8 +88,23 @@ export default function GameShell() {
     setSettingsOpen(true);
   };
 
+  useEffect(() => {
+    if(screen==="playing")return;
+    let frame=0,lastDirection:string|null=null,nextRepeat=0;const heldButtons=menuButtonsRef.current;
+    const menuScope=()=>{const root=rootRef.current;if(!root)return null;if(settingsOpen)return root.querySelector<HTMLElement>('[data-menu-screen="settings"]');return root.querySelector<HTMLElement>(`[data-menu-screen="${screen}"]`)};
+    const focusables=()=>Array.from(menuScope()?.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled)')??[]).filter(element=>element.getClientRects().length>0);
+    const focusElement=(element:HTMLElement)=>{document.querySelectorAll('.gamepad-focus').forEach(item=>item.classList.remove('gamepad-focus'));element.focus({preventScroll:false});element.classList.add('gamepad-focus');element.scrollIntoView({block:"nearest",inline:"nearest",behavior:"smooth"})};
+    const focusDefault=()=>{const items=focusables();if(!items.length)return null;const preferred=items.find(item=>item.hasAttribute('data-gamepad-default'))??items[0];focusElement(preferred);return preferred};
+    const goBack=()=>{if(settingsOpen){setSettingsOpen(false);return}if(screen==="map"){setScreen("title");return}if(screen==="paused"){resume();return}if(screen==="dead"||screen==="victory")setScreen("map")};
+    const changeControl=(element:HTMLElement,direction:string)=>{if(direction!=="left"&&direction!=="right")return false;const delta=direction==="right"?1:-1;if(element instanceof HTMLInputElement&&element.type==="range"){const step=Number(element.step)||1,min=Number(element.min),max=Number(element.max),next=Math.max(min,Math.min(max,Number(element.value)+step*delta));element.value=String(next);element.dispatchEvent(new Event("input",{bubbles:true}));element.dispatchEvent(new Event("change",{bubbles:true}));return true}if(element instanceof HTMLSelectElement){element.selectedIndex=Math.max(0,Math.min(element.options.length-1,element.selectedIndex+delta));element.dispatchEvent(new Event("change",{bubbles:true}));return true}return false};
+    const tick=(time:number)=>{const pad=Array.from(navigator.getGamepads?.()??[]).find(Boolean);if(pad){const pressed=pad.buttons.map(button=>button.pressed||button.value>.55);const items=focusables();const current=items.indexOf(document.activeElement as HTMLElement);const confirm=pressed[0]&&!heldButtons.has(0),back=pressed[1]&&!heldButtons.has(1),options=pressed[9]&&!heldButtons.has(9);if(confirm){if(current<0){focusDefault()?.click()}else items[current].click()}if(back)goBack();if(options&&screen==="paused")resume();const direction=gamepadMenuDirection(pad.axes,pressed);if(direction){if(direction!==lastDirection||time>=nextRepeat){if(current<0)focusDefault();else if(!changeControl(items[current],direction)){const next=findNextSpatialIndex(items.map(item=>item.getBoundingClientRect()),current,direction);if(next>=0)focusElement(items[next])}nextRepeat=time+(direction===lastDirection?115:310)}lastDirection=direction}else lastDirection=null;heldButtons.clear();pressed.forEach((value,index)=>{if(value)heldButtons.add(index)})}else heldButtons.clear();frame=requestAnimationFrame(tick)};
+    const clearMouseFocus=()=>document.querySelectorAll('.gamepad-focus').forEach(item=>item.classList.remove('gamepad-focus'));
+    const initial=window.setTimeout(()=>{if(Array.from(navigator.getGamepads?.()??[]).some(Boolean))focusDefault()},80);window.addEventListener("pointerdown",clearMouseFocus,{passive:true});frame=requestAnimationFrame(tick);
+    return()=>{window.clearTimeout(initial);cancelAnimationFrame(frame);window.removeEventListener("pointerdown",clearMouseFocus);document.querySelectorAll('.gamepad-focus').forEach(item=>item.classList.remove('gamepad-focus'))};
+  },[screen,settingsOpen,settingsTab]);
+
   return (
-    <main className="game-root">
+    <main ref={rootRef} className="game-root">
       <canvas ref={canvasRef} className="game-canvas" tabIndex={0} aria-label="Aurora Ascent, jogo de plataforma 3D" />
 
       <div className={`hud ${screen !== "playing" ? "hidden" : ""}`} aria-live="polite">
@@ -106,35 +124,35 @@ export default function GameShell() {
       <div className={`toast ${toast ? "show" : ""}`}>{toast}</div>
       <div className={`damage-flash ${damageFlash ? "show" : ""}`} onAnimationEnd={() => setDamageFlash(false)}/>
 
-      <section className={`screen title-screen ${screen !== "title" ? "hidden" : ""}`}>
+      <section data-menu-screen="title" className={`screen title-screen ${screen !== "title" ? "hidden" : ""}`}>
         <div className="title-card">
           <p className="eyebrow">Uma aventura acima das nuvens</p>
           <h1>Aurora <span>Ascent</span></h1>
           <p className="tagline">Os fragmentos solares se espalharam pelas ilhas do céu. Corra, salte e lute até o farol antes que a última luz desapareça.</p>
-          <div className="menu-actions"><button className="primary-btn" onClick={() => setScreen("map")}>Mapa de fases</button><button className="secondary-btn" onClick={() => openSettings("title")}>Configurações</button></div>
+          <div className="menu-actions"><button data-gamepad-default className="primary-btn" onClick={() => setScreen("map")}>Mapa de fases</button><button className="secondary-btn" onClick={() => openSettings("title")}>Configurações</button></div>
           <div className="controls-strip"><span><b className="key">WASD</b> mover</span><span><b className="key">Mouse</b> câmera</span><span><b className="key">F</b> ataque</span><span><b className="key">✕</b> DualSense</span></div>
         </div>
       </section>
 
-      {screen === "map" && <section className="campaign-screen">
+      {screen === "map" && <section data-menu-screen="map" className="campaign-screen">
         <div className="campaign-heading"><div><p className="eyebrow">Caminho da Aurora</p><h2>Mapa de fases</h2><p>Complete cada ilha para abrir a próxima rota. O desafio aumenta a cada cinco fases.</p></div><div className="campaign-actions"><span>{Math.min(25,unlockedLevel-1)} / 25 concluídas</span><button className="secondary-btn" onClick={()=>setScreen("title")}>Voltar</button></div></div>
         <div className="campaign-scroll">
           <div className="level-path" aria-label="Seleção de fases">
-            {CAMPAIGN_LEVELS.map((level)=>{const unlocked=level.number<=unlockedLevel;const completed=level.number<unlockedLevel;return <div key={level.number}>{level.connector&&<span className={`route-segment ${completed?"completed":""}`} style={{left:level.connector.x,top:level.connector.y,width:level.connector.length,transform:`rotate(${level.connector.angle}deg)`}}/>}<button disabled={!unlocked} onClick={()=>startLevel(level.number)} className={`level-node region-${level.region} ${completed?"completed":""} ${level.number===unlockedLevel?"current":""} ${level.number%5===0?"boss":""} ${level.map.x>400?"label-left":""}`} style={{left:level.map.x,top:level.map.y}} aria-label={`Fase ${level.number}: ${level.name}${unlocked?"":" bloqueada"}`}><span className="node-crown">{completed?"★":unlocked?level.number:"◆"}</span><span className="node-copy"><strong>{level.name}</strong><small>{level.gimmick}</small></span></button></div>})}
+            {CAMPAIGN_LEVELS.map((level)=>{const unlocked=level.number<=unlockedLevel;const completed=level.number<unlockedLevel;return <div key={level.number}>{level.connector&&<span className={`route-segment ${completed?"completed":""}`} style={{left:level.connector.x,top:level.connector.y,width:level.connector.length,transform:`rotate(${level.connector.angle}deg)`}}/>}<button data-gamepad-default={level.number===unlockedLevel||undefined} disabled={!unlocked} onClick={()=>startLevel(level.number)} className={`level-node region-${level.region} ${completed?"completed":""} ${level.number===unlockedLevel?"current":""} ${level.number%5===0?"boss":""} ${level.map.x>400?"label-left":""}`} style={{left:level.map.x,top:level.map.y}} aria-label={`Fase ${level.number}: ${level.name}${unlocked?"":" bloqueada"}`}><span className="node-crown">{completed?"★":unlocked?level.number:"◆"}</span><span className="node-copy"><strong>{level.name}</strong><small>{level.gimmick}</small></span></button></div>})}
           </div>
         </div>
       </section>}
 
-      {screen === "paused" && !settingsOpen && <div className="modal-backdrop"><div className="pause-card"><p className="eyebrow" style={{justifyContent:"center"}}>Jornada suspensa</p><h2>Pausado</h2><p>Respire. As ilhas continuarão aqui.</p><div className="menu-actions"><button className="primary-btn" onClick={resume}>Continuar</button><button className="secondary-btn" onClick={() => openSettings("paused")}>Configurações</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
+      {screen === "paused" && !settingsOpen && <div data-menu-screen="paused" className="modal-backdrop"><div className="pause-card"><p className="eyebrow" style={{justifyContent:"center"}}>Jornada suspensa</p><h2>Pausado</h2><p>Respire. As ilhas continuarão aqui.</p><div className="menu-actions"><button data-gamepad-default className="primary-btn" onClick={resume}>Continuar</button><button className="secondary-btn" onClick={() => openSettings("paused")}>Configurações</button><button className="secondary-btn" onClick={() => setScreen("title")}>Menu inicial</button></div></div></div>}
 
-      {screen === "dead" && <div className="modal-backdrop death-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A névoa levou sua luz</p><h2>Você caiu</h2><p>A fase {activeLevel} recomeça do início: fragmentos, guardiões e plataformas foram restaurados.</p><div className="menu-actions"><button className="primary-btn" onClick={()=>startLevel()}>Tentar novamente</button><button className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
+      {screen === "dead" && <div data-menu-screen="dead" className="modal-backdrop death-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>A névoa levou sua luz</p><h2>Você caiu</h2><p>A fase {activeLevel} recomeça do início: fragmentos, guardiões e plataformas foram restaurados.</p><div className="menu-actions"><button data-gamepad-default className="primary-btn" onClick={()=>startLevel()}>Tentar novamente</button><button className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
 
-      {screen === "victory" && <div className="modal-backdrop victory-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>Fase {activeLevel} concluída</p><h2>{activeLevel===25?"Cume conquistado!":"Rota aberta!"}</h2><p>Você reuniu os {snapshot.totalCoins} fragmentos e derrotou todos os guardiões de {levelInfo.name}.</p><div className="menu-actions">{activeLevel<25&&<button className="primary-btn" onClick={()=>startLevel(activeLevel+1)}>Próxima fase</button>}<button className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
+      {screen === "victory" && <div data-menu-screen="victory" className="modal-backdrop victory-screen"><div className="result-card"><p className="eyebrow" style={{justifyContent:"center"}}>Fase {activeLevel} concluída</p><h2>{activeLevel===25?"Cume conquistado!":"Rota aberta!"}</h2><p>Você reuniu os {snapshot.totalCoins} fragmentos e derrotou todos os guardiões de {levelInfo.name}.</p><div className="menu-actions">{activeLevel<25&&<button data-gamepad-default className="primary-btn" onClick={()=>startLevel(activeLevel+1)}>Próxima fase</button>}<button data-gamepad-default={activeLevel===25||undefined} className="secondary-btn" onClick={() => setScreen("map")}>Mapa de fases</button></div></div></div>}
 
-      <div className={`modal-backdrop ${settingsOpen ? "" : "hidden"}`}>
+      <div data-menu-screen="settings" className={`modal-backdrop ${settingsOpen ? "" : "hidden"}`}>
         <div className="modal" role="dialog" aria-modal="true" aria-label="Configurações">
           <div className="modal-header"><div><p className="eyebrow">Personalize sua jornada</p><h2>Configurações</h2></div><button className="icon-btn" aria-label="Fechar" onClick={() => { setSettingsOpen(false); if (screen === "title") return; }}>×</button></div>
-          <div className="settings-tabs">{([['video','Vídeo'],['controls','Controles'],['controller','DualSense']] as const).map(([id,label]) => <button key={id} className={`tab ${settingsTab === id ? "active" : ""}`} onClick={() => setSettingsTab(id)}>{label}</button>)}</div>
+          <div className="settings-tabs">{([['video','Vídeo'],['controls','Controles'],['controller','DualSense']] as const).map(([id,label]) => <button data-gamepad-default={settingsTab===id||undefined} key={id} className={`tab ${settingsTab === id ? "active" : ""}`} onClick={() => setSettingsTab(id)}>{label}</button>)}</div>
           <div className={`settings-panel ${settingsTab === "video" ? "active" : ""}`}>
             <div className="setting-row"><div><label>Qualidade visual</label><small>Altera resolução, sombras e densidade de partículas.</small></div><select value={settings.quality} onChange={e => updateSettings({quality:e.target.value as GameSettings['quality']})}><option value="low">Desempenho</option><option value="medium">Equilibrado</option><option value="high">Cinemático</option></select></div>
             <div className="setting-row"><div><span className="setting-title">Sombras dinâmicas</span><small>Profundidade extra para personagens e plataformas.</small></div><label className="toggle"><input type="checkbox" checked={settings.shadows} onChange={e => updateSettings({shadows:e.target.checked})}/><i/></label></div>

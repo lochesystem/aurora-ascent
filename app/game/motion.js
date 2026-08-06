@@ -4,7 +4,19 @@ export function landingInstability(impactSpeed,horizontalSpeed){
 }
 
 export function movementResponse(grounded,balancing){
-  if(!grounded)return {acceleration:4.1,drag:.38,maxSpeed:5.55};
-  if(balancing)return {acceleration:5.2,drag:2.2,maxSpeed:5.8};
-  return {acceleration:15.5,drag:8.5,maxSpeed:7};
+  if(!grounded)return {acceleration:6.8,drag:.24,maxSpeed:5.65};
+  if(balancing)return {acceleration:11,drag:3,maxSpeed:5.8};
+  return {acceleration:24,drag:4.4,maxSpeed:7};
+}
+
+export function stepPlanarVelocity(current,input,dt,grounded,balancing){
+  const response=movementResponse(grounded,balancing),inputLength=Math.hypot(input.x,input.z);
+  if(inputLength>.001){
+    const strength=Math.min(1,inputLength),target={x:input.x/inputLength*response.maxSpeed*strength,z:input.z/inputLength*response.maxSpeed*strength};
+    const delta={x:target.x-current.x,z:target.z-current.z},deltaLength=Math.hypot(delta.x,delta.z),currentLength=Math.hypot(current.x,current.z);let steering=1;
+    if(currentLength>.1){const alignment=(current.x*target.x+current.z*target.z)/(currentLength*Math.max(.001,Math.hypot(target.x,target.z)));if(alignment<-.2)steering=.72;else if(alignment<.45)steering=.86}
+    const maxChange=response.acceleration*steering*Math.max(0,dt);if(deltaLength<=maxChange)return target;
+    return {x:current.x+delta.x/deltaLength*maxChange,z:current.z+delta.z/deltaLength*maxChange};
+  }
+  const coast=Math.exp(-response.drag*Math.max(0,dt));return {x:current.x*coast,z:current.z*coast};
 }
