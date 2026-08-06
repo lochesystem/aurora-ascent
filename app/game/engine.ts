@@ -5,6 +5,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { classifyEnemyContact, coinWithinPickup } from "./collision.js";
+import { animateGuardianModel, animatePlayerModel, createGuardianModel, createPlayerModel, type GuardianRig, type PlayerRig } from "./models";
 import type { GameSettings } from "./settings";
 
 export interface GameSnapshot {
@@ -26,7 +27,7 @@ interface Callbacks {
 }
 
 type Coin = { mesh: THREE.Group; position: THREE.Vector3; collected: boolean; phase: number };
-type Enemy = { mesh: THREE.Group; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number };
+type Enemy = { mesh: THREE.Group; rig: GuardianRig; position: THREE.Vector3; origin: THREE.Vector3; alive: boolean; phase: number; hit: number };
 
 const PLATFORM_DATA = [
   { p:[0,0,0], s:[18,2,16], c:0x57a875 },
@@ -66,6 +67,7 @@ export class AuroraGame {
   private playerCollider!: RAPIER.Collider;
   private player = new THREE.Group();
   private playerVisual = new THREE.Group();
+  private playerRig!: PlayerRig;
   private coins: Coin[] = [];
   private enemies: Enemy[] = [];
   private particles!: THREE.Points;
@@ -175,6 +177,17 @@ export class AuroraGame {
     cliff.scale.x = w/d; cliff.position.y = -(h+3)/2 + h/2; cliff.castShadow = cliff.receiveShadow = true; group.add(cliff);
     const top = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.5, Math.min(w,d)*.46, .55, 8), topMat);
     top.scale.x = w/d; top.position.y = h/2+.12; top.castShadow = top.receiveShadow = true; group.add(top);
+    const rimMat = new THREE.MeshStandardMaterial({color:new THREE.Color(color).multiplyScalar(.68),roughness:.9,flatShading:true});
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(w,d)*.465,Math.min(w,d)*.43,.2,8),rimMat);
+    rim.scale.x=w/d;rim.position.y=h/2-.19;rim.castShadow=rim.receiveShadow=true;group.add(rim);
+    const grassMat = new THREE.MeshStandardMaterial({color:new THREE.Color(color).offsetHSL(.02,.08,.08),roughness:.92,flatShading:true});
+    const tuftGeometry = new THREE.ConeGeometry(.08,.34,4);
+    for(let tuftIndex=0;tuftIndex<5;tuftIndex++){
+      const angle=index*1.31+tuftIndex*2.17;
+      const tuft=new THREE.Mesh(tuftGeometry,grassMat);
+      tuft.position.set(Math.cos(angle)*w*.31,h/2+.49,Math.sin(angle)*d*.31);
+      tuft.rotation.y=angle;tuft.scale.set(1+(tuftIndex%2)*.4,.8+(tuftIndex%3)*.18,1);tuft.castShadow=true;group.add(tuft);
+    }
     this.scene.add(group);
     // A tampa verde se projeta 0,395 unidade acima do volume rochoso.
     // O collider acompanha essa superfície visível para os pés não afundarem.
@@ -215,15 +228,7 @@ export class AuroraGame {
   }
 
   private makePlayer() {
-    const white = new THREE.MeshStandardMaterial({color:0xf8f1d3,roughness:.62});
-    const navy = new THREE.MeshStandardMaterial({color:0x173c66,roughness:.55});
-    const coral = new THREE.MeshStandardMaterial({color:0xff735b,roughness:.5});
-    const glow = new THREE.MeshStandardMaterial({color:0x8affeb,emissive:0x32c9bd,emissiveIntensity:2});
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(.42,.7,6,12), navy); body.position.y=.75; body.castShadow=true; this.playerVisual.add(body);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(.48,16,12), white); head.position.y=1.45; head.scale.y=.82; head.castShadow=true; this.playerVisual.add(head);
-    const visor = new THREE.Mesh(new THREE.SphereGeometry(.36,14,8,0,Math.PI*2,0,Math.PI/2), glow); visor.position.set(0,1.47,.31); visor.rotation.x=Math.PI/2; visor.scale.set(1,.35,.55); this.playerVisual.add(visor);
-    for(const side of [-1,1]) { const boot=new THREE.Mesh(new THREE.SphereGeometry(.25,10,7),coral);boot.position.set(side*.25,.12,.12);boot.scale.set(.85,.65,1.25);boot.castShadow=true;this.playerVisual.add(boot); const arm=new THREE.Mesh(new THREE.CapsuleGeometry(.11,.5,4,7),white);arm.position.set(side*.52,.8,0);arm.rotation.z=side*.22;arm.castShadow=true;this.playerVisual.add(arm); }
-    const scarf = new THREE.Mesh(new THREE.ConeGeometry(.24,1.25,5),coral); scarf.position.set(0,1.05,-.55);scarf.rotation.x=-Math.PI/2;this.playerVisual.add(scarf);
+    this.playerRig=createPlayerModel();this.playerVisual=this.playerRig.group;
     this.player.add(this.playerVisual);
   }
 
@@ -238,11 +243,8 @@ export class AuroraGame {
 
   private makeEnemies() {
     this.enemies = ENEMY_POSITIONS.map((p,i) => {
-      const group=new THREE.Group();
-      const shell=new THREE.Mesh(new THREE.SphereGeometry(.58,12,8),new THREE.MeshStandardMaterial({color:i%2?0x7d5aa7:0xd95768,roughness:.7,flatShading:true}));shell.scale.set(1,.7,1.15);shell.position.y=.45;shell.castShadow=true;group.add(shell);
-      const face=new THREE.Mesh(new THREE.SphereGeometry(.36,10,7),new THREE.MeshStandardMaterial({color:0x2c3158,roughness:.65}));face.position.set(0,.45,.43);face.scale.set(1,.65,.45);group.add(face);
-      for(const side of [-1,1]){const eye=new THREE.Mesh(new THREE.SphereGeometry(.055,8,6),new THREE.MeshBasicMaterial({color:0xffe985}));eye.position.set(side*.13,.5,.58);group.add(eye)}
-      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0};
+      const rig=createGuardianModel(i);const group=rig.group;
+      group.position.set(...p); this.scene.add(group); const pos=new THREE.Vector3(...p);return {mesh:group,rig,position:pos.clone(),origin:pos.clone(),alive:true,phase:i*1.7,hit:0};
     });
   }
 
@@ -320,6 +322,7 @@ export class AuroraGame {
     const t=performance.now()*.009;this.playerVisual.position.y=this.grounded?Math.abs(Math.sin(t))*speed*.06:0;
     this.playerVisual.rotation.z=THREE.MathUtils.lerp(this.playerVisual.rotation.z,this.attackTimer>.2?-.35:0,.18);
     if(!this.grounded)this.playerVisual.rotation.x=THREE.MathUtils.lerp(this.playerVisual.rotation.x,-.12,.12);else this.playerVisual.rotation.x*=.82;
+    animatePlayerModel(this.playerRig,t,speed,this.grounded,this.verticalVelocity,this.attackTimer>.12);
   }
 
   private updateCoins(dt:number) {
@@ -330,8 +333,9 @@ export class AuroraGame {
   private updateEnemies(dt:number) {
     const now=performance.now()*.001;
     for(const enemy of this.enemies){if(!enemy.alive)continue;enemy.hit=Math.max(0,enemy.hit-dt);const a=now*.72+enemy.phase;enemy.position.set(enemy.origin.x+Math.cos(a)*1.05,enemy.origin.y,enemy.origin.z+Math.sin(a)*1.05);enemy.mesh.position.copy(enemy.position);enemy.mesh.rotation.y=-a+.6;enemy.mesh.position.y+=Math.sin(now*3+enemy.phase)*.08;
+      animateGuardianModel(enemy.rig,now,enemy.phase);
       const dx=this.player.position.x-enemy.position.x,dz=this.player.position.z-enemy.position.z,dist=Math.hypot(dx,dz);
-      const enemyTop=enemy.mesh.position.y+.86;
+      const enemyTop=enemy.mesh.position.y+.98;
       const contact=classifyEnemyContact({horizontalDistance:dist,playerFeetY:this.player.position.y-.04,enemyTopY:enemyTop,verticalVelocity:this.verticalVelocity});
       if(contact==="stomp"){
         const body=this.playerBody.translation();
